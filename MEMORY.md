@@ -24,8 +24,50 @@ El progreso del proyecto se rige por las siguientes reglas estrictas de transici
 
 ## Historial de Versiones
 
-### [Alpha 0.2] — 2026-10-13
+### [Alpha 0.4] — 2026-10-17
 * **Estado:** Actual
+* **Hito:** Implementación del subsistema de logging dúplex con marcas de tiempo y bucle de eventos UDP continuo en el servidor (`PongServer`).
+* **Descripción técnica:**
+  * Consolidación del bucle continuo de escucha UDP (`loop { socket.recv_from(&mut buf) }`) en `src/bin/server.rs`, transformando el servidor en un servicio residente permanente.
+  * Implementación de la función de logging dúplex `registrar_log(&mut File, &str)` con escritura simultánea a consola estándar (`println!`) y persistencia atómica en disco (`writeln!`).
+  * Apertura robusta del archivo de trazas mediante `OpenOptions::new().create(true).append(true)` garantizando que los logs no se sobreescriban entre reinicios del servicio.
+  * Integración de marcas de tiempo universales calculadas mediante `SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()` para auditoría de eventos y datagramas entrantes.
+  * Higiene de memoria mediante reasignación del buffer `[0u8; 1024]` en cada vuelta de ciclo para prevenir contaminación entre datagramas.
+  * Verificación funcional exitosa en tiempo real mediante inyección de paquetes UDP de prueba y comprobación de persistencia física en archivo de log.
+  * Blindaje pedagógico formalizado en `AGENTS.md` (Reglas 1, 2 y Sección 5) estableciendo avance atómico, directivas conceptuales y ejemplos de juguete aislados.
+* **Archivos intervenidos:**
+  * `src/bin/server.rs`: Lógica del bucle continuo, manejo de archivo de log y timestamps.
+  * `AGENTS.md`: Metodología pedagógica paso a paso y protocolo de interacción.
+  * `MEMORY.md`: Registro de versión Alpha 0.4.
+* **Próximos pasos pendientes:**
+  * Diseñar el módulo de serialización y deserialización binaria manual (`src/protocol.rs`) para la cabecera fija de 12 bytes (Fase 4).
+  * Implementar pruebas unitarias en Rust para verificar empaquetado y desempaquetado exacto en orden Big-Endian sin uso de Serde.
+  * Definir las estructuras en Rust para los payloads de registro (`HELLO_REQ` / `HELLO_ACK`) y movimiento (`INPUT_CMD`).
+
+---
+
+### [Alpha 0.3] — 2026-10-14
+* **Estado:** Completado
+* **Hito:** Especificación formal del protocolo binario de capa de aplicación (`MyAppGameProtocol`) en `docs/protocolo.md`.
+* **Descripción técnica:**
+  * Diseño de la cabecera fija de 12 bytes: `Magic Byte` (`0x50`), `Protocol Version` (`0x01`), `Message Type` (`u16`), `Sequence Number` (`u32`), `Session ID` (`u16`), `Payload Length` (`u16`).
+  * Adopción de Network Byte Order (Big-Endian) para todos los campos multibyte (`u16`, `u32`, `f32`).
+  * Definición del catálogo de mensajes: `HELLO_REQ` (`0x0001`), `HELLO_ACK` (`0x0002`), `WAITING_OPPONENT` (`0x0003`), `MATCH_START` (`0x0004`), `INPUT_CMD` (`0x0005`), `STATE_SYNC` (`0x0006`), `GAME_OVER` (`0x0007`).
+  * Especificación de empaquetado para cadenas variables (Nickname, Email) mediante codificación *Length-Prefixed* (Pascal string).
+  * Optimización de paquetes de alta frecuencia: `INPUT_CMD` (13 bytes totales) y `STATE_SYNC` (31 bytes totales: 16B coords, 2B goles, 1B status, 12B cabecera).
+* **Archivos intervenidos:**
+  * `docs/protocolo.md`: Documento formal de especificación del protocolo binario.
+  * `MEMORY.md`: Registro de versión Alpha 0.3.
+  * `AGENTS.md`: Transición a Fase 3 (Comunicación UDP Básica y Logging).
+* **Próximos pasos pendientes:**
+  * Implementación del subsistema de logging concurrente (archivo + terminal) en el servidor (Fase 3).
+  * Bucle de escucha continuo no bloqueante en `src/bin/server.rs`.
+  * Serialización/deserialización manual en Rust de cabeceras y payloads (Fase 4).
+
+---
+
+### [Alpha 0.2] — 2026-10-13
+* **Estado:** Completado
 * **Hito:** Construcción de la interfaz gráfica funcional (`PongClient` GUI) con renderizado a 60 FPS y puente de red desacoplado (`NetworkBridge`).
 * **Descripción técnica:**
   * Reestructuración del proyecto en Cargo con soporte multibinario independiente: `server` (`src/bin/server.rs`) y `client` (`src/bin/client.rs`).
