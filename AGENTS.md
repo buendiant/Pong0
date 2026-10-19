@@ -82,11 +82,11 @@ El desarrollo del proyecto avanza de forma estrictamente secuencial a través de
                     ↓
 [Fase 3: Comunicación UDP Básica y Logging] (COMPLETADA)
                     ↓
-[Fase 4: Serialización / Deserialización Manual de Bytes] ◄ [FASE ACTUAL]
+[Fase 4: Serialización / Deserialización Manual de Bytes] (COMPLETADA)
                     ↓
-[Fase 5: Servidor Autoritativo y Concurrencia de Múltiples Partidas]
+[Fase 5: Servidor Autoritativo y Concurrencia de Múltiples Partidas] (COMPLETADA)
                     ↓
-[Fase 6: Integración Cliente-Servidor y Sincronización de Estados]
+[Fase 6: Integración Cliente-Servidor y Sincronización de Estados] ◄ [FASE ACTUAL]
                     ↓
 [Fase 7: Despliegue en AWS y Pruebas bajo Condiciones Reales de Red]
 ```
@@ -99,21 +99,23 @@ El desarrollo del proyecto avanza de forma estrictamente secuencial a través de
 
 2. **Fase 2: Especificación Formal de `MyAppGameProtocol` (COMPLETADA):**
    * *Objetivo:* Diseñar sobre papel/markdown el protocolo binario en capa de aplicación.
-   * *Criterio de salida:* Documentar en el repositorio el diagrama de bits de la cabecera fija (Tipo, Seq, Longitud, etc.) y los tipos de mensajes (`HELLO_REQ`, `JOIN_PAIR`, `INPUT_CMD`, `STATE_SYNC`, `GAME_OVER`). Cumplido en `docs/protocolo.md`.
+   * *Criterio de salida:* Documentar en el repositorio el diagrama de bits de la cabecera fija (Tipo, Seq, Longitud, etc.) y los tipos de mensajes (`HELLO_REQ`, `HELLO_ACK`, `WAITING_OPPONENT`, `MATCH_START`, `INPUT_CMD`, `STATE_SYNC`, `GAME_OVER`). Cumplido en `docs/protocolo.md`.
 
 3. **Fase 3: Comunicación UDP Básica y Logging (COMPLETADA):**
    * *Objetivo:* Completar el socket Berkeley UDP del servidor y el cliente básico; implementar el logger que imprime en terminal y guarda simultáneamente en `<Log File>`.
    * *Criterio de salida:* Servidor capaz de recibir datagramas UDP arbitrarios y registrarlos con marca de tiempo, IP:Puerto y bytes. Cumplido en `src/bin/server.rs`.
 
-4. **Fase 4: Serialización y Deserialización Manual de Bytes (FASE ACTUAL):**
+4. **Fase 4: Serialización y Deserialización Manual de Bytes (COMPLETADA):**
    * *Objetivo:* Escribir en Rust funciones puras para empaquetar y desempaquetar structs hacia/desde `[u8]` sin librerías de alto nivel (como Serde), controlando endianness (`to_be_bytes()`, `from_be_bytes()`).
    * *Criterio de salida:* Pruebas unitarias en Rust donde un mensaje serializado se reconstruye byte a byte idéntico al original.
+   * *Evidencia:* `src/protocol.rs`, con siete tipos de mensajes, validación y pruebas de bytes exactos, ida/vuelta y paquetes inválidos.
 
-5. **Fase 5: Servidor Autoritativo y Concurrencia de Múltiples Partidas:**
+5. **Fase 5: Servidor Autoritativo y Concurrencia de Múltiples Partidas (COMPLETADA):**
    * *Objetivo:* Implementar en el servidor la cola de emparejamiento (matchmaking) y el manejo concurrente de $N$ partidas simultáneas usando hilos o `Arc<Mutex<T>>`.
    * *Criterio de salida:* Dos pares de clientes distintos pueden jugar en paralelo en el mismo servidor sin interferir entre sí.
+   * *Evidencia:* `src/game.rs`, `src/server.rs` y `tests/server_udp.rs`. Validación en localhost con cuatro clientes UDP automatizados, dos simulaciones independientes y cierre de una partida sin interrumpir la otra. La GUI conectada pertenece a la fase 6.
 
-6. **Fase 6: Integración Cliente-Servidor y Sincronización de Estados:**
+6. **Fase 6: Integración Cliente-Servidor y Sincronización de Estados (FASE ACTUAL):**
    * *Objetivo:* Reemplazar el `spawn_offline_demo_worker` del cliente por `spawn_udp_network_worker`, conectando el `NetworkBridge` con el socket UDP.
    * *Criterio de salida:* Dos clientes físicos se conectan por red a `PongServer`, disputan una partida real y visualizan marcadores y físicas autoritativas.
 
@@ -254,7 +256,7 @@ pub enum MatchStatus {
 
 ### 7.4. Guía para Conectar la Capa de Red UDP al GUI
 
-Cuando comiencen las Fases 3, 4 y 6, conectar el código de red al GUI solo requerirá los siguientes pasos:
+Al comenzar la Fase 6, conectar el código de red al GUI requerirá los siguientes pasos, reutilizando `src/protocol.rs` y respetando las reglas de `docs/protocolo.md`:
 
 1. **Crear el módulo de red (ejemplo: `src/client/network.rs`):**
    Escribir la función que levantará el hilo de comunicación utilizando el endpoint provisto:
@@ -274,7 +276,7 @@ Cuando comiencen las Fases 3, 4 y 6, conectar el código de red al GUI solo requ
            let socket = UdpSocket::bind("0.0.0.0:0").expect("Error al enlazar socket cliente");
            socket.set_nonblocking(true).expect("Error configurando no bloqueo");
 
-           // 2. Enviar handshake inicial binario (HELLO_REQ / JOIN_PAIR)
+           // 2. Enviar handshake inicial binario (HELLO_REQ)
            // let handshake_bytes = serializar_handshake(&nickname, &email);
            // socket.send_to(&handshake_bytes, &server_addr);
 
@@ -330,7 +332,7 @@ Para evitar colisiones y desincronización entre las sesiones de trabajo de los 
 
 1. **Antes de empezar a programar:**
    ```bash
-   git pull origin main
+   git pull origin master
    ```
    Revisar `MEMORY.md` para verificar en qué versión y fase quedó el proyecto.
 
@@ -348,5 +350,5 @@ Para evitar colisiones y desincronización entre las sesiones de trabajo de los 
      ```bash
      git add .
      git commit -m "feat(red): [Alpha 0.x] Descripción clara del hito completado"
-     git push origin main
+     git push origin master
      ```

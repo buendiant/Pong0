@@ -24,8 +24,133 @@ El progreso del proyecto se rige por las siguientes reglas estrictas de transici
 
 ## Historial de Versiones
 
+### [Alpha 0.5] — 2026-10-19
+
+* **Estado:** Actual.
+* **Hito:** Fases 4 y 5 implementadas y verificadas: protocolo binario manual, servidor autoritativo y partidas concurrentes independientes.
+* **Alcance:** Implementación realizada por solicitud expresa del usuario, primero fase 4 y después fase 5. La memoria se actualiza posteriormente, con autorización del usuario, para dejar constancia del proceso. El cliente gráfico sigue en demo local: no se declara BETA ni MVP online.
+
+#### Paso 1. Revisar el punto de partida y las guías
+
+* Se revisaron `AGENTS.md`, `ProyectoPongN1.md`, esta bitácora, `docs/protocolo.md` y el código existente.
+* La base local era `d84d32e`, rama `master` siguiendo `origin/master`: receptor UDP con logs y GUI desacoplada mediante `NetworkBridge`, todavía sin protocolo implementado ni partidas de servidor.
+* Se preservó la separación de responsabilidades: sin sockets ni parsing dentro de la GUI y con compilación del servidor sin dependencias gráficas.
+
+#### Paso 2. Resolver la compatibilidad del compilador
+
+* Rust/Cargo 1.82.0 no admitía la edición 2024 de `Cargo.toml`.
+* Se instaló Rust 1.85.1 junto al existente y con él se verificó inicialmente el protocolo y el servidor.
+* Al comprobar la GUI se detectó que `fontdue 0.9.4`, ya fijado por el lockfile original, utiliza funciones no disponibles en 1.85.1.
+* Se instaló Rust **1.90.0** y se fijó para este repositorio en `rust-toolchain.toml`, con `rustfmt` y Clippy. Se conservó la toolchain global predeterminada y no se cambiaron dependencias ni `Cargo.lock`.
+
+#### Paso 3. Implementar la cabecera y los siete mensajes — Fase 4
+
+* Se creó `src/protocol.rs` y se expuso desde `src/lib.rs`.
+* Se definieron `Header`, `Packet`, los tipos de mensaje y sus payloads: `HELLO_REQ`, `HELLO_ACK`, `WAITING_OPPONENT`, `MATCH_START`, `INPUT_CMD`, `STATE_SYNC` y `GAME_OVER`.
+* La conversión es manual mediante slices, `to_be_bytes`, `from_be_bytes` y representación binaria de `f32`, sin Serde ni serializadores automáticos.
+* Se respetaron cabecera de **12 bytes**, entrada de **13 bytes** y estado de **31 bytes**. Las cadenas usan longitud prefijada en bytes UTF-8, con límite de 255 bytes por cadena.
+
+#### Paso 4. Validar y consolidar el protocolo antes de pasar a la fase 5
+
+* El lector comprueba límites antes de extraer bytes; rechaza truncamientos, magic o versión incorrectos, opcodes desconocidos, longitudes incompatibles, bytes sobrantes, UTF-8 inválido y discriminantes inválidos.
+* Se rechazan cadenas vacías, asignación de sesión cero y coordenadas no finitas o fuera del campo.
+* Se implementó comparación modular de secuencias, incluido el paso `u32::MAX -> 0`, descartando entradas repetidas o atrasadas.
+* Pasaron **7 pruebas de protocolo** antes de implementar la fase 5: bytes esperados, ida/vuelta de los siete mensajes, layout de estado, cadenas, errores de formato, coordenadas y secuencias.
+
+#### Paso 5. Crear la simulación autoritativa pura — Fase 5
+
+* Se creó `src/game.rs`, independiente de sockets, relojes del sistema y GUI.
+* Cada `Game` posee posiciones, velocidades, intenciones, marcadores y ganador de una única partida.
+* Se implementaron movimiento de palas limitado a centros Y `[45, 555]`, rebotes de pelota contra paredes y palas, goles, reinicio al centro, pausa de **800 ms** y victoria a **7 puntos**.
+* La simulación usa subpasos de hasta 8 ms y limita la velocidad horizontal tras rebotes. Solo el servidor determina el tiempo y el resultado; los clientes envían intenciones.
+* Se añadieron **5 pruebas del motor** para límites y detención, rebotes, goles/pausa/victoria y aislamiento entre instancias.
+
+#### Paso 6. Registrar sesiones y emparejar jugadores
+
+* Se creó `src/server.rs` con `PongServer` y `ServerConfig`, usando `std::net::UdpSocket`.
+* El receptor central valida paquetes, asigna IDs no nulos ligados a IP:puerto y administra una cola FIFO de espera.
+* Dos registros forman una pareja: izquierda para el primero, derecha para el segundo, con notificación del nickname rival.
+* Repetir `HELLO_REQ` con el mismo endpoint y perfil recupera la sesión y su estado; no crea otra sesión ni reinicia una partida.
+* Las entradas bajo una sesión ajena, mensajes exclusivos del servidor y secuencias duplicadas o antiguas se rechazan.
+* Se limita la capacidad predeterminada a **256 sesiones**, incluyendo las que retienen un resultado final.
+
+#### Paso 7. Ejecutar partidas concurrentes y registrar el tráfico
+
+* Cada pareja se ejecuta en un hilo con estado propio y un canal de entradas acotado a **128** elementos. No se comparte el estado mutable de todas las partidas mediante un candado global.
+* Se comparte el socket de envío y se sincroniza el logger con `Mutex` para mantener líneas completas en consola y archivo.
+* Se envían estados autoritativos con cadencia objetivo de **60 Hz**, dependiente del host. El planificador conserva los plazos y omite ticks excesivamente atrasados.
+* El receptor procesa como máximo **64 datagramas por vuelta** para permitir limpieza y cierre aun con tráfico continuo.
+* Se registran RX/TX, origen o destino, sesión, tipo, bytes y eventos de registro, emparejamiento, gol, fin, rechazo y error.
+* Se sustituyó el receptor inicial de `src/bin/server.rs` por el arranque de `PongServer`, manteniendo `server <PUERTO> <Archivo Log>` y añadiendo validación del puerto y códigos de salida de error.
+
+#### Paso 8. Manejar pérdidas, desconexiones y liberación de recursos
+
+* Una intención sin entrada fresca expira a los **250 ms** y detiene la pala. El futuro trabajador UDP debe repetir la intención actual, incluido `Stop`, cada **100 ms** como máximo.
+* La sesión de lobby o jugador en partida vence a los **10 segundos** sin actividad válida. Una desconexión termina esa partida con `GAME_OVER` y deja continuar a las otras.
+* `MATCH_START` se repite cada **500 ms** para recuperar pérdidas del mensaje de control.
+* Al terminar se une el hilo y se conserva/repite `GAME_OVER` durante **5 segundos**; después se eliminan las sesiones y se libera capacidad para nuevos registros.
+* El receptor utiliza un buffer de UDP completo y descarta datagramas mayores al máximo válido de **524 bytes**, evitando aceptar un prefijo truncado como paquete completo.
+* `PongServer::run` permite parada mediante bandera compartida para cerrar y unir los hilos desde las pruebas o un host que lo integre.
+
+#### Paso 9. Verificar el resultado con sockets reales y herramientas de Rust
+
+* Resultado final: **20 pruebas aprobadas** — 7 de protocolo, 5 de simulación y **8 de integración UDP**.
+* Las pruebas UDP comprueban: cuatro clientes formando dos parejas con movimientos independientes; registro repetido; sesiones falsas/orden/mensajes inválidos; pérdida de `Stop`; timeout de una pareja sin interrumpir la otra; expiración de lobby; rechazo de datagramas malformados o grandes; y recuperación de capacidad con nuevo registro desde el mismo endpoint.
+* Se comprobó la compilación del cliente y se construyó el servidor sin features gráficas. Clippy de la biblioteca headless, servidor y pruebas terminó sin advertencias con `-D warnings`.
+* Se verificaron los errores del ejecutable ante argumentos incompletos y puerto inválido. Se aplicó `rustfmt` y `git diff --check` no encontró errores de whitespace.
+* Las pruebas de localhost requirieron ejecución fuera del aislamiento de red. No se verificaron todavía la GUI en ejecución, FPS, rendimiento bajo carga ni conectividad entre computadores o AWS.
+* Los artefactos de verificación se guardaron en subdirectorios separados de `target/`, conservando los archivos antiguos ya versionados.
+
+Comandos de referencia, desde la raíz del repositorio:
+
+```powershell
+cargo test --locked --no-default-features --target-dir target/codex-validation
+cargo check --locked --bin server --no-default-features --target-dir target/codex-validation
+cargo check --locked --bin client --target-dir target/codex-client-validation
+cargo build --locked --bin server --no-default-features --target-dir target/codex-validation
+cargo clippy --locked --no-default-features --all-targets --target-dir target/codex-validation -- -D warnings
+```
+
+#### Paso 10. Dejar la documentación preparada para continuar
+
+* Se completó `docs/protocolo.md` con payload vacío de `WAITING_OPPONENT`, procedimientos de registro, secuencias, reintentos, expiración, fin y validación.
+* Se creó `docs/fases-4-5.md` con la explicación de arquitectura, pasos de implementación, pruebas y ejecución.
+* Se actualizó `docs/estado-actual.md` y se marcaron fases 4 y 5 completadas y **fase 6 actual** en `AGENTS.md`; también se ajustaron las referencias de rama a `master` y los nombres reales del protocolo.
+* El registro describe cambios locales: no implica commit, push ni despliegue.
+
+* **Archivos intervenidos en el hito:**
+  * `src/protocol.rs`: codec manual, tipos y siete pruebas.
+  * `src/game.rs`: simulación autoritativa y cinco pruebas.
+  * `src/server.rs`: registro, emparejamiento, hilos, estados, logging y limpieza.
+  * `src/lib.rs`: exposición de los módulos nuevos.
+  * `src/bin/server.rs`: arranque y validación CLI.
+  * `tests/server_udp.rs`: ocho pruebas con sockets reales.
+  * `rust-toolchain.toml`: Rust 1.90.0 para el repositorio.
+  * `docs/protocolo.md`, `docs/fases-4-5.md`, `docs/estado-actual.md` y `AGENTS.md`: especificación y continuidad.
+  * `MEMORY.md`: registro posterior del hito como Alpha 0.5.
+
+* **Próximos pasos pendientes:**
+  * **Fase 6:** implementar el trabajador UDP del cliente y sustituir `spawn_offline_demo_worker`, usando exclusivamente `NetworkBridge` para comunicar GUI y red.
+  * Integrar reintentos, repetición de intenciones, descarte de estados atrasados y mapeo de los datos del protocolo a `GameStateSnapshot`.
+  * Decidir la representación de `Ready`, `Quit` y RTT, que no tienen mensajes definidos en el catálogo actual, y de los campos visuales no incluidos en `STATE_SYNC`.
+  * Verificar una partida completa entre dos clientes gráficos reales antes de declarar BETA.
+  * **Fase 7:** desplegar en AWS Academy, probar por Internet y preparar README, Makefile y entrega. Sigue pendiente limpiar del índice los artefactos antiguos de `target/` y aclarar con el docente la nota contradictoria C/Rust del enunciado.
+
+---
+
+### Revisión inicial del entorno local — 2026-10-19 (diagnóstico histórico, superado por Alpha 0.5)
+
+* **Versión funcional:** Se mantiene Alpha 0.4; no se implementaron componentes nuevos.
+* **Sincronización:** Repositorio descargado en `C:\Users\Asus\Documents\ChatGPT\Pong0`, rama `master` siguiendo `origin/master`, commit `d84d32e`.
+* **Diagnóstico:** Código y documentación revisados; la fase activa sigue siendo la 4. La GUI utiliza simulación local y el servidor solo recibe y registra datagramas.
+* **Validación:** Ambos `cargo check` (servidor sin features y cliente) fallaron al analizar el manifiesto porque Cargo 1.82.0 no admite la edición 2024. No se validó compilación ni ejecución en este equipo.
+* **Informe:** `docs/estado-actual.md` contiene evidencias, fases pendientes y precisiones de protocolo, entrega y repositorio.
+* **Siguiente paso:** Resolver la compatibilidad de la toolchain y retomar la cabecera binaria de 12 bytes, manteniendo la metodología pedagógica de AGENTS.md.
+
+---
+
 ### [Alpha 0.4] — 2026-10-17
-* **Estado:** Actual
+* **Estado:** Completado
 * **Hito:** Implementación del subsistema de logging dúplex con marcas de tiempo y bucle de eventos UDP continuo en el servidor (`PongServer`).
 * **Descripción técnica:**
   * Consolidación del bucle continuo de escucha UDP (`loop { socket.recv_from(&mut buf) }`) en `src/bin/server.rs`, transformando el servidor en un servicio residente permanente.

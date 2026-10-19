@@ -1,88 +1,29 @@
+use pong_lib::server::{PongServer, ServerConfig};
 use std::env;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::net::UdpSocket;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-fn registrar_log(archivo: &mut File, mensaje: &str) {
-    let ahora = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    println!("{} {}", ahora, mensaje);
-    if let Err(e) = writeln!(archivo, "{} {}", ahora, mensaje) {
-        eprintln!("Error escribiendo en log: {}", e);
-    }
-}
-
-fn main() {
+fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        println!("Modo de uso: server <PUERTO> <Archivo Log>");
-        return;
+    if args.len() != 3 {
+        eprintln!("Modo de uso: server <PUERTO> <Archivo Log>");
+        return ExitCode::FAILURE;
     }
-
-    let puerto = &args[1];
-    let archivo_log = &args[2];
-    let direccion = format!("0.0.0.0:{}", puerto);
-
-    let socket = match UdpSocket::bind(&direccion) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "Error: No se pudo enlazar al socket en {}: {}",
-                direccion, e
-            );
-            return;
+    let port = match args[1].parse::<u16>() {
+        Ok(port) if port != 0 => port,
+        _ => {
+            eprintln!("Error: el puerto debe estar entre 1 y 65535");
+            return ExitCode::FAILURE;
         }
     };
-
-    let mut log_file: File = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(archivo_log)
+    match PongServer::bind(("0.0.0.0", port), &args[2], ServerConfig::default())
+        .and_then(|server| server.run(Arc::new(AtomicBool::new(false))))
     {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!(
-                "Error: No se pudo abrir el archivo de log en {}: {}",
-                archivo_log, e
-            );
-            return;
-        }
-    };
-
-    registrar_log(
-        &mut log_file,
-        &format!("Servidor Pong iniciado en {}", direccion),
-    );
-    registrar_log(
-        &mut log_file,
-        &format!("Archivo de log configurado: {}", archivo_log),
-    );
-    registrar_log(&mut log_file, "Esperando datagramas UDP...");
-
-    loop {
-        let mut buf = [0u8; 1024];
-
-        match socket.recv_from(&mut buf) {
-            Ok((bytes_recibidos, origen)) => {
-                let evento = format!(
-                    "Recibidos {} bytes desde {}: {:?}",
-                    bytes_recibidos,
-                    origen,
-                    &buf[..bytes_recibidos]
-                );
-                registrar_log(&mut log_file, &evento);
-            }
-            Err(e) => {
-                eprintln!("Fallo al recibir el paquete: {}", e);
-                registrar_log(
-                    &mut log_file,
-                    &format!("Fallo al recibir el paquete: {}", e),
-                );
-            }
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error del servidor: {error}");
+            ExitCode::FAILURE
         }
     }
 }

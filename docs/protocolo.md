@@ -89,6 +89,14 @@ Enviado por el servidor tras aceptar al cliente.
 
 ---
 
+### 4.2.1. `0x0003` — `WAITING_OPPONENT` (Espera en Lobby)
+
+No contiene payload: `Payload Length = 0`; el datagrama completo ocupa 12 bytes.
+La cabecera identifica la sesión asignada. Recibir este mensaje repetido no crea
+una segunda sesión ni modifica una partida ya iniciada.
+
+---
+
 ### 4.3. `0x0004` — `MATCH_START` (Inicio de Partida)
 Notifica a ambos jugadores que fueron emparejados.
 
@@ -136,3 +144,92 @@ Enviado por el servidor a ~60 Hz a ambos clientes de la partida.
   * `winner_side` (`u8`, 1 byte): `0x01` = Ganó P1, `0x02` = Ganó P2.
   * `reason` (`u8`, 1 byte): `0x00` = Puntos máximos alcanzados, `0x01` = Desconexión del oponente.
 * **Tamaño Total del Payload:** 2 bytes.
+
+---
+
+## 5. Reglas de procedimiento implementadas en las fases 4 y 5
+
+### Registro y emparejamiento
+
+1. El cliente envía `HELLO_REQ` con Session ID `0`, nickname y email.
+2. El servidor asigna un ID no nulo, devuelve `HELLO_ACK` (el ID del payload
+   coincide con el de la cabecera) y `WAITING_OPPONENT`.
+3. La cola FIFO empareja dos sesiones: la primera recibe lado izquierdo y la
+   segunda lado derecho. Se inicia una simulación autoritativa independiente.
+4. Cada jugador recibe `MATCH_START` con el nombre de su rival, seguido por
+   `STATE_SYNC` a una cadencia objetivo de 60 Hz, dependiente del host.
+
+El máximo predeterminado es de 256 sesiones, incluidas las que conservan un
+resultado final. Si se alcanza el límite, se descartan nuevos registros; v1 no
+define un mensaje de rechazo. Nunca se crea una sesión desde `INPUT_CMD`.
+
+Un `HELLO_REQ` repetido desde la misma IP:puerto y con el mismo perfil devuelve
+la sesión existente y su estado de control (`WAITING_OPPONENT`, `MATCH_START`
+o `GAME_OVER`). Puede conservar Session ID `0` o usar el ID ya asignado. No
+vuelve a emparejar al jugador ni reinicia sus físicas. Cambiar de perfil en el
+mismo endpoint antes de expirar la sesión se rechaza. Un endpoint nuevo debe
+registrarse con ID `0`.
+
+### Entradas, secuencias y pérdida de paquetes
+
+- Las entradas contienen intenciones (`Stop`, `MoveUp`, `MoveDown`), nunca
+  coordenadas ni marcadores. Solo el servidor mueve palas, pelota y puntuaciones.
+- Para aceptar un `INPUT_CMD`, el ID debe pertenecer a la IP:puerto de origen.
+  Se comprueba su secuencia contra la última entrada aceptada de esa sesión.
+  Duplicados y entradas antiguas se descartan. La comparación modular admite
+  `u32::MAX -> 0`; diferencias de medio espacio (`2^31`) o más no son nuevas.
+- La primera secuencia de entrada es libre. Los reintentos de registro no
+  consumen esta secuencia. El servidor usa un contador de salida global `u32`;
+  las secuencias recibidas por un cliente pueden tener saltos.
+- Durante una partida, el cliente debe repetir **su intención actual**, incluido
+  `Stop`, al menos cada 100 ms con nueva secuencia. Si transcurren 250 ms sin una
+  entrada fresca, el servidor detiene la pala. Así, perder una liberación de tecla
+  no deja un movimiento permanente.
+- Antes de recibir `HELLO_ACK`, el cliente puede repetir `HELLO_REQ` cada 500 ms.
+  En lobby debe repetirlo al menos una vez por segundo para conservar la sesión.
+  Un registro repetido en partida sirve de señal de vida, pero no mantiene una
+  intención de movimiento que ya expiró.
+- `MATCH_START` se repite cada 500 ms durante la partida para recuperar la
+  pérdida de ese mensaje. El cliente debe tratarlo de forma idempotente.
+- Cada `STATE_SYNC` reemplaza el estado anterior; no se retransmiten fotos
+  antiguas. El receptor debe descartar estados atrasados por secuencia. Ninguna
+  de estas reglas convierte UDP en un transporte de entrega garantizada.
+
+### Fin de partida y limpieza
+
+Una partida termina cuando alguien alcanza **7 puntos**, o cuando un jugador
+acumula **10 segundos sin entradas válidas ni registro repetido**. En el segundo
+caso pierde el primer jugador cuyo vencimiento detecta el tick (izquierda si
+ambos vencen en el mismo tick). Las sesiones de lobby sin actividad también
+expiran a los 10 segundos.
+
+Tras un gol, la pelota vuelve al centro y el estado señala el anotador durante
+800 ms antes del siguiente saque. Las palas permanecen dentro de los centros
+Y `[45, 555]`; la pelota rebota en paredes y palas. La simulación usa subpasos de
+hasta 8 ms y limita la velocidad horizontal a 600 px/s tras los rebotes.
+
+El hilo termina al finalizar la partida y el receptor central lo une. Conserva
+`GAME_OVER` durante **5 segundos**, lo repite cada 500 ms y lo devuelve ante
+consultas válidas de la sesión. Luego elimina ambas sesiones y libera capacidad.
+Un nuevo registro con ID `0` después de esa retención inicia otro ciclo. Las
+otras partidas continúan durante todo este proceso.
+
+v1 no incorpora mensajes `Ready`, `Quit` ni ping/pong: esos comandos visuales
+necesitan una decisión de integración en fase 6. Dejar de enviar actividad se
+detecta por timeout; la medición RTT tampoco está implementada en esta fase.
+
+## 6. Validación de datagramas
+
+El codec manual comprueba cabecera mínima, magic, versión, opcode conocido,
+longitud exacta, discriminantes válidos y consumo completo del payload. Las
+cadenas deben contener entre 1 y 255 **bytes UTF-8**, y el servidor además
+rechaza perfiles vacíos tras recortar espacios o con caracteres de control.
+Las coordenadas deben ser finitas y pertenecer al campo de juego; `HELLO_ACK`
+no puede asignar ID `0`.
+
+El datagrama máximo válido ocupa **524 bytes** (cabecera más dos cadenas de
+255 bytes y sus longitudes). El receptor usa un buffer capaz de recibir UDP
+completo y descarta los datagramas mayores, para que un paquete truncado no
+pueda hacerse pasar por uno válido. Los mensajes exclusivos del servidor que
+llegan de un cliente se rechazan. RX, TX, rechazos y eventos se registran en
+consola y archivo con acceso sincronizado entre hilos.
