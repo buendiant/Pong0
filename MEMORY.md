@@ -24,9 +24,98 @@ El progreso del proyecto se rige por las siguientes reglas estrictas de transici
 
 ## Historial de Versiones
 
-### [Alpha 0.5] — 2026-10-19
+### [Alpha 0.6] — 2026-10-25
 
 * **Estado:** Actual.
+* **Hito:** Implementación de fase 6: cliente gráfico conectado al servidor UDP autoritativo, con registro, estados, RTT, abandono y reconexión.
+* **Alcance:** Implementación completa solicitada expresamente por el usuario. Se verificaron clientes automatizados y dos ventanas gráficas en un computador. Se conserva Alpha hasta realizar la aceptación formal entre dos equipos físicos; no se declara esa prueba realizada ni se registra despliegue AWS.
+
+#### Paso 1. Sincronizar y verificar la base
+
+* Se consultaron ramas y etiquetas remotas y se ejecutó `git pull --ff-only origin master`: sin novedades, base `b445013` (Alpha 0.5), árbol limpio antes de comenzar.
+* Se revisaron las guías, enunciado, memoria, protocolo y contrato de `NetworkBridge`; las 20 pruebas anteriores seguían pasando y ambos binarios compilaban.
+
+#### Paso 2. Definir la configuración e inicio online
+
+* Se añadió `NetworkConfig` con servidor, nickname y correo, validación de puerto, límites de bytes UTF-8 y perfil. La validación no abre sockets ni resuelve DNS en la GUI.
+* El cliente inicia online con tres argumentos o muestra un formulario al ejecutarlo sin argumentos. `--demo` conserva la simulación local y `--help` muestra el uso.
+* El formulario permite editar los campos y presenta errores de validación. Los errores de argumentos se detectan antes de abrir una ventana.
+
+#### Paso 3. Implementar el trabajador UDP mediante el puente
+
+* Se creó `src/client/network.rs`; el trabajador es dueño exclusivo del socket no bloqueante y comunica entradas/snapshots con la GUI por los canales existentes.
+* `spawn_udp_network_worker` devuelve un `JoinHandle` dentro de un resultado; los errores de creación se pueden mostrar sin bloquear el renderizado.
+* El socket UDP conectado al endpoint del servidor filtra el origen. El trabajador valida además sesión y paquetes mediante el codec compartido, manteniendo sockets y parsing fuera de `gui.rs` y `renderer.rs`.
+
+#### Paso 4. Registrar, emparejar y mantener las intenciones
+
+* Se implementaron estados de conexión, registro con `HELLO_REQ`/`HELLO_ACK`, lobby e inicio con lado y nickname del rival.
+* El saludo se reintenta cada 500 ms; en partida se recuerda y repite la intención actual cada 50 ms, incluido `Stop`, aunque la GUI solo envíe los cambios de tecla.
+* Se mantiene un contador modular para comandos entrantes del cliente y se descartan duplicados o estados antiguos recibidos del servidor.
+* El timeout inicial de registro es de 5 segundos; tras registrarse, 3 segundos sin respuesta válida producen una desconexión visible y recuperable.
+
+#### Paso 5. Conectar estados autoritativos con la representación visual
+
+* Se mapean coordenadas, palas, marcador y estado del protocolo a `GameStateSnapshot`; los goles `u8` se convierten a `u16`.
+* Se conservan lado y nombres del emparejamiento. Las velocidades visuales son estimaciones entre fotos, no una simulación física del cliente; el reinicio de un punto usa el temporizador visual de 800 ms.
+* Un `MATCH_START` repetido y un `WAITING_OPPONENT` atrasado no borran el marcador ni reinician una partida.
+* Se corrigió el puente para conservar `GameOver` o una razón de desconexión al cerrar el canal, en lugar de reemplazarlos por un error genérico.
+
+#### Paso 6. Añadir RTT y salida voluntaria al protocolo binario
+
+* Se añadieron `PING` (`0x0008`) y `PONG` (`0x0009`), con token `u32` Big-Endian de cuatro bytes: 16 bytes por datagrama completo. El cliente envía ping cada segundo y solo mide RTT si el eco coincide con un token pendiente.
+* Se añadió `LEAVE` (`0x000A`), payload vacío y 12 bytes totales, para salida desde lobby o partida.
+* Los formatos anteriores y versión 1 se conservan. Las extensiones se documentan en `docs/protocolo.md`; cliente y servidor actualizados usan diez tipos de mensaje.
+* `INPUT_CMD`, `PING` y `LEAVE` comparten validación de origen, sesión y secuencia. Ping mantiene señal de vida sin renovar movimiento; Leave en partida utiliza una señal atómica por lado independiente de la cola acotada, para no perder el abandono si la cola está llena.
+
+#### Paso 7. Resolver cierre, reconexión y orden de mensajes terminales
+
+* `Quit` envía Leave como mejor esfuerzo y termina el trabajador. ESC y cierre nativo de ventana generan ese comando. Si la red pierde la salida, el timeout del servidor sigue siendo respaldo.
+* `Ready` tras desconexión o fin abre un socket nuevo, limpia sesión/secuencias y vuelve al registro, sin esperar la retención del endpoint anterior. En partida activa no altera la simulación.
+* Una revisión independiente detectó que `GAME_OVER` podía adelantarse a `MATCH_START` o a la foto final: se corrigió el cliente para completar nombres/lado y el marcador terminal sin permitir volver a `InMatch`.
+* El servidor conserva metadata y foto final por puntuación, reenvía esa foto con el resultado durante cinco segundos y recupera metadata ante saludo repetido. Estas consultas no prolongan la retención. El abandono no inventa un marcador final.
+* En la revisión previa al commit se corrigió otro caso de desorden: si llega un abandono antes de `MATCH_START`, se conserva el marcador y las coordenadas de la foto autoritativa pendiente. Una prueba reproduce el marcador 5:2 y verifica que los metadatos tardíos no cambien el ganador ni reabran la partida.
+
+#### Paso 8. Ajustar la GUI para operación online
+
+* Se actualizó el arranque para usar el trabajador real; la demo requiere `--demo`.
+* El HUD distingue conexión, demo y RTT pendiente/medido; controles y telemetría usan líneas separadas. Los textos largos se ajustan al espacio disponible.
+* Se conserva la renderización desacoplada. El cierre espera el hilo de forma asíncrona hasta un segundo para no congelarse si el DNS del sistema tarda en responder.
+
+#### Paso 9. Verificar con pruebas y ventanas reales
+
+* **41 pruebas aprobadas:** 19 unitarias, 8 en `tests/client_network.rs`, 6 en `tests/protocol_extensions.rs` y las 8 originales de `tests/server_udp.rs`.
+* Las pruebas del cliente incluyen cuatro trabajadores/dos partidas, intención sostenida, RTT correlacionado, Quit/Ready, pérdida de registro, mensajes desordenados, sesiones incorrectas, timeout y conservación del resultado.
+* Se ejecutó una partida autoritativa completa hasta **7:0** con dos trabajadores reales, sin modificar las reglas del motor para acelerar la victoria. Ambos conservaron el mismo marcador y ganador.
+* Se abrieron dos clientes gráficos contra un servidor local: ambas ventanas mostraron **7:0**, nombres y lados correctos y RTT observado de **4 ms**. Se revisó además el formulario y su mensaje de validación.
+* Las capturas se guardaron en `docs/evidencias/fase6-ana.png` y `docs/evidencias/fase6-bob.png`. Las ventanas y el servidor temporal se cerraron tras verificar.
+* `cargo fmt --all -- --check` y Clippy de todos los targets con `-D warnings` terminaron correctamente. Se comprobaron los binarios, ayuda/errores CLI y el servidor headless; el entorno requiere ejecución fuera del aislamiento para UDP local.
+
+#### Paso 10. Documentar el alcance y la aceptación pendiente
+
+* Se creó `docs/fase-6.md` con arquitectura, comandos de servidor y dos clientes, controles, pruebas y procedimiento entre dos computadores.
+* Se actualizaron `docs/protocolo.md`, `docs/estado-actual.md` y `AGENTS.md` para reflejar la implementación real y las extensiones. La guía ya no pide crear un trabajador que existe.
+* La verificación en dos equipos físicos, rendimiento bajo carga, RTT por Internet y AWS permanecen pendientes. Las pruebas locales y capturas no se presentan como evidencia de esas condiciones.
+* Tras completar la implementación, el usuario solicitó expresamente un commit local con verificación previa. El registro conserva Alpha 0.6 y no incluye un push. El límite del 22 de octubre en el enunciado permanece sin cambios.
+
+* **Archivos intervenidos:**
+  * `src/client/network.rs`, `src/client/connection.rs`, `src/client/mod.rs`: trabajador, configuración, formulario y exports.
+  * `src/bin/client.rs`, `src/client/gui.rs`, `src/client/renderer.rs`: arranque online, cierre y visualización.
+  * `src/client/bridge.rs`, `src/client/types.rs`: preservación de estados terminales y ajustes de documentación/formato.
+  * `src/protocol.rs`, `src/server.rs`: ping/pong, salida, validación y recuperación de datos finales.
+  * `tests/client_network.rs`, `tests/protocol_extensions.rs`: pruebas nuevas del cliente y extensiones.
+  * `docs/fase-6.md`, `docs/protocolo.md`, `docs/estado-actual.md`, `docs/evidencias/`, `AGENTS.md` y `MEMORY.md`: continuidad y evidencias.
+
+* **Próximos pasos pendientes:**
+  * Ejecutar el procedimiento de aceptación de fase 6 en dos equipos físicos y registrar marcadores, movimiento, desconexión y RTT de esa red.
+  * Una vez acreditado ese criterio, cerrar formalmente fase 6 y revisar la transición a BETA.
+  * Fase 7: AWS Academy, pruebas por Internet, README final, Makefile y entrega; la limpieza de los artefactos ya versionados en `target/` sigue pendiente.
+
+---
+
+### [Alpha 0.5] — 2026-10-19
+
+* **Estado:** Completado.
 * **Hito:** Fases 4 y 5 implementadas y verificadas: protocolo binario manual, servidor autoritativo y partidas concurrentes independientes.
 * **Alcance:** Implementación realizada por solicitud expresa del usuario, primero fase 4 y después fase 5. La memoria se actualiza posteriormente, con autorización del usuario, para dejar constancia del proceso. El cliente gráfico sigue en demo local: no se declara BETA ni MVP online.
 

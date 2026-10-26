@@ -86,7 +86,7 @@ El desarrollo del proyecto avanza de forma estrictamente secuencial a través de
                     ↓
 [Fase 5: Servidor Autoritativo y Concurrencia de Múltiples Partidas] (COMPLETADA)
                     ↓
-[Fase 6: Integración Cliente-Servidor y Sincronización de Estados] ◄ [FASE ACTUAL]
+[Fase 6: Integración Cliente-Servidor y Sincronización de Estados] (IMPLEMENTADA Y VALIDADA LOCALMENTE; PRUEBA ENTRE EQUIPOS PENDIENTE)
                     ↓
 [Fase 7: Despliegue en AWS y Pruebas bajo Condiciones Reales de Red]
 ```
@@ -115,9 +115,11 @@ El desarrollo del proyecto avanza de forma estrictamente secuencial a través de
    * *Criterio de salida:* Dos pares de clientes distintos pueden jugar en paralelo en el mismo servidor sin interferir entre sí.
    * *Evidencia:* `src/game.rs`, `src/server.rs` y `tests/server_udp.rs`. Validación en localhost con cuatro clientes UDP automatizados, dos simulaciones independientes y cierre de una partida sin interrumpir la otra. La GUI conectada pertenece a la fase 6.
 
-6. **Fase 6: Integración Cliente-Servidor y Sincronización de Estados (FASE ACTUAL):**
+6. **Fase 6: Integración Cliente-Servidor y Sincronización de Estados (IMPLEMENTADA; ACEPTACIÓN ENTRE EQUIPOS PENDIENTE):**
    * *Objetivo:* Reemplazar el `spawn_offline_demo_worker` del cliente por `spawn_udp_network_worker`, conectando el `NetworkBridge` con el socket UDP.
    * *Criterio de salida:* Dos clientes físicos se conectan por red a `PongServer`, disputan una partida real y visualizan marcadores y físicas autoritativas.
+   * *Evidencia local:* `src/client/network.rs`, formulario/CLI online y ocho pruebas de `tests/client_network.rs`; partida completa a siete puntos y dos ventanas gráficas con el mismo resultado, nombres/lados y RTT. Evidencias y procedimiento en `docs/fase-6.md`.
+   * *Límite de validación:* Este entorno tiene un computador. La implementación está lista, pero la aceptación literal entre dos equipos físicos aún requiere ejecutar el procedimiento documentado. No atribuir a las pruebas locales conectividad LAN/Internet o despliegue AWS.
 
 7. **Fase 7: Despliegue en AWS Academy y Entrega:**
    * *Objetivo:* Desplegar `PongServer` en una instancia EC2 de AWS Academy, verificar conectividad remota a través de Internet, medir RTT real y documentar en `README.md`.
@@ -162,7 +164,7 @@ El cliente divide claramente el trabajo en dos hilos de ejecución para evitar q
    * Realiza `poll_latest_state()` sobre `state_receiver` (consumiendo de forma no bloqueante la foto más reciente enviada por el servidor).
    * Dibuja el marco de juego en coordenadas virtuales de 800x600 px (mesa, palas, pelota, marcador, overlay de estado, RTT/FPS).
 
-2. **Hilo de Red (UDP Worker Thread — Desarrollado por el Estudiante):**
+2. **Hilo de Red (UDP Worker Thread — `src/client/network.rs`):**
    * Se ejecuta en segundo plano mediante `std::thread::spawn`.
    * Es el dueño exclusivo del socket UDP de Berkeley (`std::net::UdpSocket`).
    * Recibe de forma no bloqueante comandos del GUI desde `input_receiver`, los serializa al formato binario de `MyAppGameProtocol` y los envía con `socket.send_to(buffer, server_addr)`.
@@ -254,48 +256,25 @@ pub enum MatchStatus {
 }
 ```
 
-### 7.4. Guía para Conectar la Capa de Red UDP al GUI
+### 7.4. Cliente UDP implementado y continuación
 
-Al comenzar la Fase 6, conectar el código de red al GUI requerirá los siguientes pasos, reutilizando `src/protocol.rs` y respetando las reglas de `docs/protocolo.md`:
+La fase 6 se implementó por solicitud expresa del usuario. El módulo
+`src/client/network.rs` reutiliza `src/protocol.rs` y respeta las reglas de
+`docs/protocolo.md`.
 
-1. **Crear el módulo de red (ejemplo: `src/client/network.rs`):**
-   Escribir la función que levantará el hilo de comunicación utilizando el endpoint provisto:
-   ```rust
-   use std::net::UdpSocket;
-   use std::thread;
-   use pong_lib::client::{NetworkWorkerEndpoint, ClientInput, GameStateSnapshot};
-
-   pub fn spawn_udp_network_worker(
-       endpoint: NetworkWorkerEndpoint,
-       server_addr: String,
-       nickname: String,
-       email: String,
-   ) {
-       thread::spawn(move || {
-           // 1. Enlazar socket UDP Berkeley
-           let socket = UdpSocket::bind("0.0.0.0:0").expect("Error al enlazar socket cliente");
-           socket.set_nonblocking(true).expect("Error configurando no bloqueo");
-
-           // 2. Enviar handshake inicial binario (HELLO_REQ)
-           // let handshake_bytes = serializar_handshake(&nickname, &email);
-           // socket.send_to(&handshake_bytes, &server_addr);
-
-           // 3. Bucle de red:
-           // - Leer inputs de endpoint.input_receiver -> serializar -> socket.send_to()
-           // - Leer datagramas de socket.recv_from() -> deserializar a GameStateSnapshot -> endpoint.state_sender.send()
-       });
-   }
-   ```
-
-2. **Reemplazar la llamada en `src/bin/client.rs`:**
-   En lugar de llamar a `spawn_offline_demo_worker(endpoint)`, se invoca la función de red:
-   ```rust
-   // Antes (Demo local):
-   // spawn_offline_demo_worker(endpoint);
-
-   // Después (Conectado por red):
-   // mi_modulo_red::spawn_udp_network_worker(endpoint, "127.0.0.1:8080".into(), "Jugador1".into(), "user@mail.com".into());
-   ```
+1. **Configuración:** `NetworkConfig::new` valida servidor, nickname y correo sin
+   resolver DNS ni abrir sockets en la GUI.
+2. **Inicio:** `spawn_udp_network_worker(endpoint, config)` devuelve un resultado
+   con el handle del hilo. La GUI conserva su extremo de `NetworkBridge`.
+3. **Estado:** el trabajador realiza registro, ping/pong, repetición de entradas
+   y recepción de fotos autoritativas. Publica snapshots con nombres, lado,
+   marcador, estado y RTT; no recalcula la física del servidor.
+4. **Cierre y reconexión:** `Quit` envía LEAVE; `Ready` en un estado terminal abre
+   un nuevo socket y registra otra sesión. El puente conserva el resultado final.
+5. **Ejecución:** sin argumentos el cliente muestra el formulario; con servidor,
+   nickname y email inicia online; `--demo` selecciona explícitamente la demo.
+6. **Aceptación pendiente:** seguir `docs/fase-6.md` en dos equipos físicos. Las
+   evidencias locales se conservan en `docs/evidencias/`; no sustituyen esa prueba.
 
 ---
 

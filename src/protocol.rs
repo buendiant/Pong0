@@ -35,6 +35,9 @@ pub enum MessageType {
     InputCmd = 5,
     StateSync = 6,
     GameOver = 7,
+    Ping = 8,
+    Pong = 9,
+    Leave = 10,
 }
 
 impl TryFrom<u16> for MessageType {
@@ -48,6 +51,9 @@ impl TryFrom<u16> for MessageType {
             5 => Ok(Self::InputCmd),
             6 => Ok(Self::StateSync),
             7 => Ok(Self::GameOver),
+            8 => Ok(Self::Ping),
+            9 => Ok(Self::Pong),
+            10 => Ok(Self::Leave),
             other => Err(ProtocolError::UnknownMessage(other)),
         }
     }
@@ -218,6 +224,13 @@ pub enum Message {
         winner_side: Side,
         reason: EndReason,
     },
+    Ping {
+        token: u32,
+    },
+    Pong {
+        token: u32,
+    },
+    Leave,
 }
 
 impl Message {
@@ -230,6 +243,9 @@ impl Message {
             Self::InputCmd { .. } => MessageType::InputCmd,
             Self::StateSync(_) => MessageType::StateSync,
             Self::GameOver { .. } => MessageType::GameOver,
+            Self::Ping { .. } => MessageType::Ping,
+            Self::Pong { .. } => MessageType::Pong,
+            Self::Leave => MessageType::Leave,
         }
     }
 
@@ -248,7 +264,7 @@ impl Message {
                 }
                 bytes.extend_from_slice(&assigned_session_id.to_be_bytes());
             }
-            Self::WaitingOpponent => {}
+            Self::WaitingOpponent | Self::Leave => {}
             Self::MatchStart {
                 side,
                 opponent_nickname,
@@ -274,6 +290,9 @@ impl Message {
                 reason,
             } => {
                 bytes.extend_from_slice(&[*winner_side as u8, *reason as u8]);
+            }
+            Self::Ping { token } | Self::Pong { token } => {
+                bytes.extend_from_slice(&token.to_be_bytes());
             }
         }
         Ok(bytes)
@@ -320,6 +339,13 @@ impl Message {
                 winner_side: Side::decode(reader.u8()?)?,
                 reason: EndReason::decode(reader.u8()?)?,
             },
+            MessageType::Ping => Self::Ping {
+                token: reader.u32()?,
+            },
+            MessageType::Pong => Self::Pong {
+                token: reader.u32()?,
+            },
+            MessageType::Leave => Self::Leave,
         };
         if !reader.remaining.is_empty() {
             return Err(ProtocolError::LengthMismatch);

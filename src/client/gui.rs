@@ -8,6 +8,7 @@ use crate::client::types::{ClientInput, GameStateSnapshot};
 pub async fn run_client_gui(bridge: NetworkBridge) {
     let mut state = GameStateSnapshot::default();
     let mut last_movement: Option<ClientInput> = None;
+    prevent_quit();
 
     loop {
         // 1. Actualizar el estado visual con la última instantánea disponible del puente
@@ -37,9 +38,10 @@ pub async fn run_client_gui(bridge: NetworkBridge) {
         // Acciones discretas
         if is_key_pressed(KeyCode::Space) {
             bridge.send_input(ClientInput::Ready);
+            last_movement = None;
         }
 
-        if is_key_pressed(KeyCode::Escape) {
+        if is_key_pressed(KeyCode::Escape) || is_quit_requested() {
             bridge.send_input(ClientInput::Quit);
             break;
         }

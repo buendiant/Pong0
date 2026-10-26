@@ -2,7 +2,7 @@
 //! La GUI no interviene: este módulo solo depende de la biblioteca estándar.
 use crate::game::Game;
 use crate::protocol::{
-    Action, EndReason, MAX_DATAGRAM_LEN, Message, Packet, Side, sequence_is_newer,
+    Action, EndReason, MAX_DATAGRAM_LEN, Message, Packet, Side, StateSync, sequence_is_newer,
 };
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -123,6 +123,9 @@ enum Phase {
     },
     Finished {
         result: Message,
+        side: Side,
+        opponent: String,
+        final_state: Option<StateSync>,
         expires: Instant,
         next_send: Instant,
     },
@@ -134,7 +137,7 @@ struct Session {
     nickname: String,
     email: String,
     last_seen: Instant,
-    last_input_sequence: Option<u32>,
+    last_client_sequence: Option<u32>,
     phase: Phase,
 }
 
@@ -147,10 +150,17 @@ struct MatchFinished {
     match_id: u64,
     sessions: [u16; 2],
     result: Message,
+    final_state: Option<StateSync>,
 }
 struct RunningMatch {
     commands: SyncSender<Activity>,
+    leaving: Arc<[AtomicBool; 2]>,
     handle: JoinHandle<()>,
+}
+
+struct MatchControl {
+    commands: Receiver<Activity>,
+    leaving: Arc<[AtomicBool; 2]>,
 }
 
 pub struct PongServer {
@@ -279,30 +289,10 @@ impl PongServer {
                 self.register(address, packet.session_id, nickname, email, stop);
             }
             Message::InputCmd { action } => {
-                let Some(session) = self.sessions.get_mut(&packet.session_id) else {
-                    self.wire.logger.log(format!(
-                        "RECHAZADO sesión desconocida={} origen={address}",
-                        packet.session_id
-                    ));
-                    return;
-                };
-                if session.address != address {
-                    self.wire.logger.log(format!(
-                        "RECHAZADO origen no corresponde a sesión={}",
-                        session.id
-                    ));
+                if !self.accept_client_packet(address, packet.session_id, packet.sequence) {
                     return;
                 }
-                if session
-                    .last_input_sequence
-                    .is_some_and(|previous| !sequence_is_newer(packet.sequence, previous))
-                {
-                    self.wire.logger.log(format!(
-                        "IGNORADO INPUT duplicado/fuera de orden sesión={} seq={}",
-                        session.id, packet.sequence
-                    ));
-                    return;
-                }
+                let session = &self.sessions[&packet.session_id];
                 match &session.phase {
                     Phase::Playing { match_id, side, .. } => {
                         if let Some(running) = self.matches.get(match_id) {
@@ -312,10 +302,7 @@ impl PongServer {
                                 action: Some(action),
                                 received_at: now,
                             }) {
-                                Ok(()) => {
-                                    session.last_input_sequence = Some(packet.sequence);
-                                    session.last_seen = now;
-                                }
+                                Ok(()) => {}
                                 Err(TrySendError::Full(_)) => self.wire.logger.log(format!(
                                     "INPUT descartado: cola llena partida={match_id}"
                                 )),
@@ -331,10 +318,86 @@ impl PongServer {
                     }
                 }
             }
+            Message::Ping { token } => {
+                if !self.accept_client_packet(address, packet.session_id, packet.sequence) {
+                    return;
+                }
+                let session = &self.sessions[&packet.session_id];
+                // Ping mantiene viva la sesión, pero no renueva una intención de pala.
+                if let Phase::Playing { match_id, side, .. } = &session.phase
+                    && let Some(running) = self.matches.get(match_id)
+                {
+                    let _ = running.commands.try_send(Activity {
+                        side: *side,
+                        action: None,
+                        received_at: session.last_seen,
+                    });
+                }
+                self.wire.send(session.id, address, Message::Pong { token });
+            }
+            Message::Leave => {
+                if !self.accept_client_packet(address, packet.session_id, packet.sequence) {
+                    return;
+                }
+                self.wire.logger.log(format!(
+                    "ABANDONO sesión={} origen={address}",
+                    packet.session_id
+                ));
+                match &self.sessions[&packet.session_id].phase {
+                    Phase::Playing { match_id, side, .. } => {
+                        if let Some(running) = self.matches.get(match_id) {
+                            // Una bandera separada de la cola acotada no pierde el cierre
+                            // incluso si el cliente llenó antes la cola con movimientos.
+                            running.leaving[*side as usize - 1].store(true, Ordering::Release);
+                        }
+                    }
+                    Phase::Waiting | Phase::Finished { .. } => {
+                        self.remove_session(packet.session_id)
+                    }
+                }
+            }
             other => self.wire.logger.log(format!(
                 "RECHAZADO mensaje exclusivo del servidor: {:?} origen={address}",
                 other.message_type()
             )),
+        }
+    }
+
+    /// Las peticiones de una sesión comparten un único espacio de secuencias.
+    fn accept_client_packet(&mut self, address: SocketAddr, id: u16, sequence: u32) -> bool {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            self.wire.logger.log(format!(
+                "RECHAZADO sesión desconocida={id} origen={address}"
+            ));
+            return false;
+        };
+        if session.address != address {
+            self.wire
+                .logger
+                .log(format!("RECHAZADO origen no corresponde a sesión={id}"));
+            return false;
+        }
+        if session
+            .last_client_sequence
+            .is_some_and(|previous| !sequence_is_newer(sequence, previous))
+        {
+            self.wire.logger.log(format!(
+                "IGNORADO comando duplicado/fuera de orden sesión={id} seq={sequence}"
+            ));
+            return false;
+        }
+        session.last_client_sequence = Some(sequence);
+        session.last_seen = Instant::now();
+        true
+    }
+
+    fn remove_session(&mut self, id: u16) {
+        if let Some(session) = self.sessions.remove(&id) {
+            self.addresses.remove(&session.address);
+            self.waiting.retain(|waiting| *waiting != id);
+            self.wire
+                .logger
+                .log(format!("SESIÓN CERRADA id={id} origen={}", session.address));
         }
     }
 
@@ -401,7 +464,29 @@ impl PongServer {
                         });
                     }
                 }
-                Phase::Finished { result, .. } => self.wire.send(id, address, result.clone()),
+                Phase::Finished {
+                    result,
+                    side,
+                    opponent,
+                    final_state,
+                    ..
+                } => {
+                    // Si se perdió MATCH_START, recuperar lado/nombres sigue siendo
+                    // necesario para presentar correctamente el resultado terminal.
+                    self.wire.send(
+                        id,
+                        address,
+                        Message::MatchStart {
+                            side: *side,
+                            opponent_nickname: opponent.clone(),
+                        },
+                    );
+                    if let Some(state) = final_state {
+                        self.wire
+                            .send(id, address, Message::StateSync(state.clone()));
+                    }
+                    self.wire.send(id, address, result.clone());
+                }
             }
             return;
         }
@@ -422,7 +507,7 @@ impl PongServer {
                 nickname,
                 email,
                 last_seen: Instant::now(),
-                last_input_sequence: None,
+                last_client_sequence: None,
                 phase: Phase::Waiting,
             },
         );
@@ -461,6 +546,11 @@ impl PongServer {
             let match_id = self.next_match;
             self.next_match += 1;
             let (commands, receiver) = mpsc::sync_channel(128);
+            let leaving = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
+            let control = MatchControl {
+                commands: receiver,
+                leaving: Arc::clone(&leaving),
+            };
             let wire = Arc::clone(&self.wire);
             let config = self.config.clone();
             let finished = self.completed_tx.clone();
@@ -469,7 +559,7 @@ impl PongServer {
             match thread::Builder::new()
                 .name(format!("pong-match-{match_id}"))
                 .spawn(move || {
-                    run_match(match_id, roster, receiver, wire, config, stopping, finished);
+                    run_match(match_id, roster, control, wire, config, stopping, finished);
                 }) {
                 Ok(handle) => {
                     for (index, id) in [left, right].into_iter().enumerate() {
@@ -480,8 +570,14 @@ impl PongServer {
                                 opponent: players[1 - index].nickname.clone(),
                             };
                     }
-                    self.matches
-                        .insert(match_id, RunningMatch { commands, handle });
+                    self.matches.insert(
+                        match_id,
+                        RunningMatch {
+                            commands,
+                            leaving,
+                            handle,
+                        },
+                    );
                     self.wire.logger.log(format!(
                         "EMPAREJAMIENTO partida={match_id} izquierda={left} derecha={right}"
                     ));
@@ -508,8 +604,14 @@ impl PongServer {
             let now = Instant::now();
             for id in finished.sessions {
                 if let Some(session) = self.sessions.get_mut(&id) {
+                    let Phase::Playing { side, opponent, .. } = &session.phase else {
+                        continue;
+                    };
                     session.phase = Phase::Finished {
                         result: finished.result.clone(),
+                        side: *side,
+                        opponent: opponent.clone(),
+                        final_state: finished.final_state.clone(),
                         expires: now + self.config.terminal_retention,
                         next_send: now + self.config.control_interval,
                     };
@@ -530,8 +632,15 @@ impl PongServer {
                 }
                 Phase::Finished { expires, .. } if now >= *expires => expired.push(id),
                 Phase::Finished {
-                    result, next_send, ..
+                    result,
+                    final_state,
+                    next_send,
+                    ..
                 } if now >= *next_send => {
+                    if let Some(state) = final_state {
+                        self.wire
+                            .send(id, session.address, Message::StateSync(state.clone()));
+                    }
                     self.wire.send(id, session.address, result.clone());
                     *next_send = now + self.config.control_interval;
                 }
@@ -570,7 +679,7 @@ fn send_start(wire: &Wire, players: &[Session; 2]) {
 fn run_match(
     match_id: u64,
     players: [Session; 2],
-    commands: Receiver<Activity>,
+    control: MatchControl,
     wire: Arc<Wire>,
     config: ServerConfig,
     stop: Arc<AtomicBool>,
@@ -586,6 +695,20 @@ fn run_match(
     let result = loop {
         if stop.load(Ordering::Relaxed) {
             return;
+        }
+        if let Some(departed) = control
+            .leaving
+            .iter()
+            .position(|flag| flag.load(Ordering::Acquire))
+        {
+            break Message::GameOver {
+                winner_side: if departed == 0 {
+                    Side::Right
+                } else {
+                    Side::Left
+                },
+                reason: EndReason::OpponentDisconnected,
+            };
         }
         let now = Instant::now();
         if now >= next_tick {
@@ -640,7 +763,10 @@ fn run_match(
                 next_control = now + config.control_interval;
             }
         }
-        match commands.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
+        match control
+            .commands
+            .recv_timeout(next_tick.saturating_duration_since(Instant::now()))
+        {
             Ok(activity) => {
                 let index = activity.side as usize - 1;
                 last_seen[index] = activity.received_at;
@@ -655,6 +781,17 @@ fn run_match(
     };
     wire.logger
         .log(format!("FIN partida={match_id} resultado={result:?}"));
+    let final_state = if matches!(
+        &result,
+        Message::GameOver {
+            reason: EndReason::ScoreLimit,
+            ..
+        }
+    ) {
+        Some(game.snapshot())
+    } else {
+        None
+    };
     for player in &players {
         wire.send(player.id, player.address, result.clone());
     }
@@ -662,5 +799,170 @@ fn run_match(
         match_id,
         sessions: [players[0].id, players[1].id],
         result,
+        final_state,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finished_score_snapshot_is_replayed_with_metadata_without_extending_retention() {
+        let log =
+            std::env::temp_dir().join(format!("pong-terminal-replay-{}.log", std::process::id()));
+        let mut server = PongServer::bind("127.0.0.1:0", &log, ServerConfig::default()).unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client.connect(server.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let address = client.local_addr().unwrap();
+        server.sessions.insert(
+            1,
+            Session {
+                id: 1,
+                address,
+                nickname: "Ana".into(),
+                email: "ana@example.com".into(),
+                last_seen: Instant::now(),
+                last_client_sequence: None,
+                phase: Phase::Playing {
+                    match_id: 7,
+                    side: Side::Left,
+                    opponent: "Bob".into(),
+                },
+            },
+        );
+        server.addresses.insert(address, 1);
+        let snapshot = StateSync {
+            ball_x: 400.0,
+            ball_y: 300.0,
+            paddle_left_y: 200.0,
+            paddle_right_y: 350.0,
+            score_left: 7,
+            score_right: 2,
+            status: crate::protocol::StateStatus::Finished,
+        };
+        let result = Message::GameOver {
+            winner_side: Side::Left,
+            reason: EndReason::ScoreLimit,
+        };
+        server
+            .completed_tx
+            .send(MatchFinished {
+                match_id: 7,
+                sessions: [1, 2],
+                result: result.clone(),
+                final_state: Some(snapshot.clone()),
+            })
+            .unwrap();
+        server.finish_matches();
+        let expires_before = match &server.sessions[&1].phase {
+            Phase::Finished { expires, .. } => *expires,
+            _ => panic!("la sesión debía quedar terminada"),
+        };
+        server.register(
+            address,
+            0,
+            "Ana".into(),
+            "ana@example.com".into(),
+            &Arc::new(AtomicBool::new(false)),
+        );
+        let mut buffer = [0; 1024];
+        for expected in [
+            Message::HelloAck {
+                assigned_session_id: 1,
+            },
+            Message::MatchStart {
+                side: Side::Left,
+                opponent_nickname: "Bob".into(),
+            },
+            Message::StateSync(snapshot.clone()),
+            result.clone(),
+        ] {
+            let length = client.recv(&mut buffer).unwrap();
+            let packet = Packet::decode(&buffer[..length]).unwrap();
+            assert_eq!(packet.session_id, 1);
+            assert_eq!(packet.message, expected);
+        }
+        if let Phase::Finished {
+            expires, next_send, ..
+        } = &mut server.sessions.get_mut(&1).unwrap().phase
+        {
+            assert_eq!(*expires, expires_before);
+            *next_send = Instant::now();
+        }
+        server.expire_sessions();
+        for expected in [Message::StateSync(snapshot), result] {
+            let length = client.recv(&mut buffer).unwrap();
+            assert_eq!(Packet::decode(&buffer[..length]).unwrap().message, expected);
+        }
+        if let Phase::Finished { expires, .. } = &mut server.sessions.get_mut(&1).unwrap().phase {
+            assert_eq!(*expires, expires_before);
+            *expires = Instant::now();
+        }
+        server.expire_sessions();
+        assert!(!server.sessions.contains_key(&1));
+        assert!(!server.addresses.contains_key(&address));
+        drop(server);
+        let _ = std::fs::remove_file(log);
+    }
+
+    #[test]
+    fn leave_is_preserved_when_the_match_input_queue_is_full() {
+        let log = std::env::temp_dir().join(format!("pong-leave-full-{}.log", std::process::id()));
+        let mut server = PongServer::bind("127.0.0.1:0", &log, ServerConfig::default()).unwrap();
+        let address: SocketAddr = "127.0.0.1:32123".parse().unwrap();
+        server.sessions.insert(
+            1,
+            Session {
+                id: 1,
+                address,
+                nickname: "Ana".into(),
+                email: "ana@example.com".into(),
+                last_seen: Instant::now(),
+                last_client_sequence: None,
+                phase: Phase::Playing {
+                    match_id: 7,
+                    side: Side::Right,
+                    opponent: "Bob".into(),
+                },
+            },
+        );
+        server.addresses.insert(address, 1);
+        let (commands, _receiver) = mpsc::sync_channel(128);
+        for _ in 0..128 {
+            commands
+                .try_send(Activity {
+                    side: Side::Right,
+                    action: Some(Action::MoveUp),
+                    received_at: Instant::now(),
+                })
+                .unwrap();
+        }
+        let leaving = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
+        server.matches.insert(
+            7,
+            RunningMatch {
+                commands,
+                leaving: Arc::clone(&leaving),
+                handle: thread::spawn(|| {}),
+            },
+        );
+        server.handle_packet(
+            address,
+            Packet {
+                sequence: 1,
+                session_id: 1,
+                message: Message::Leave,
+            },
+            &Arc::new(AtomicBool::new(false)),
+        );
+        assert!(!leaving[0].load(Ordering::Acquire));
+        assert!(leaving[1].load(Ordering::Acquire));
+        assert_eq!(server.sessions[&1].last_client_sequence, Some(1));
+        drop(server);
+        let _ = std::fs::remove_file(log);
+    }
 }

@@ -58,6 +58,9 @@ Todos los datagramas intercambiados entre cliente y servidor inician obligatoria
 | `0x0005` | `INPUT_CMD` | Cliente $\rightarrow$ Servidor | Envío de intención de movimiento de pala. |
 | `0x0006` | `STATE_SYNC` | Servidor $\rightarrow$ Cliente | Estado autoritativo continuo (físicas, palas y marcador). |
 | `0x0007` | `GAME_OVER` | Servidor $\rightarrow$ Cliente | Fin de partida con indicación de ganador y causa. |
+| `0x0008` | `PING` | Cliente $\rightarrow$ Servidor | Medición RTT y señal de vida de una sesión registrada. |
+| `0x0009` | `PONG` | Servidor $\rightarrow$ Cliente | Eco del token de un `PING` válido. |
+| `0x000A` | `LEAVE` | Cliente $\rightarrow$ Servidor | Salida voluntaria de lobby o partida. |
 
 ---
 
@@ -147,7 +150,27 @@ Enviado por el servidor a ~60 Hz a ambos clientes de la partida.
 
 ---
 
-## 5. Reglas de procedimiento implementadas en las fases 4 y 5
+### 4.7. `0x0008` / `0x0009` — `PING` / `PONG` (RTT)
+
+Payload: `token: u32`, 4 bytes Big-Endian. Datagrama completo: **16 bytes**.
+El cliente guarda la hora monotónica de envío y calcula RTT únicamente cuando
+recibe el mismo token en un `PONG` de su servidor y sesión. Un token desconocido
+no actualiza RTT. El servidor exige sesión, origen y secuencia válidos antes de
+responder. Esta señal de vida no renueva una intención de movimiento.
+
+### 4.8. `0x000A` — `LEAVE` (Salida voluntaria)
+
+Payload vacío; datagrama completo: **12 bytes**. Comparte las comprobaciones de
+sesión, origen y secuencia de `INPUT_CMD` y `PING`. Libera una sesión en lobby o
+terminada; durante una partida la simulación termina con victoria del rival y
+causa `OpponentDisconnected`. Una señal de salida independiente de la cola de
+inputs evita perder el abandono cuando esa cola está llena.
+
+Estas extensiones conservan versión `1` y todos los formatos anteriores. Una
+implementación antigua puede rechazar los opcodes nuevos; cliente y servidor
+deben usar el código actualizado para RTT y salida inmediata.
+
+## 5. Reglas de procedimiento
 
 ### Registro y emparejamiento
 
@@ -165,7 +188,8 @@ define un mensaje de rechazo. Nunca se crea una sesión desde `INPUT_CMD`.
 
 Un `HELLO_REQ` repetido desde la misma IP:puerto y con el mismo perfil devuelve
 la sesión existente y su estado de control (`WAITING_OPPONENT`, `MATCH_START`
-o `GAME_OVER`). Puede conservar Session ID `0` o usar el ID ya asignado. No
+o los datos finales de la partida). Si terminó, reenvía lado, nombre rival,
+foto final si terminó por puntuación y `GAME_OVER`. Puede conservar Session ID `0` o usar el ID ya asignado. No
 vuelve a emparejar al jugador ni reinicia sus físicas. Cambiar de perfil en el
 mismo endpoint antes de expirar la sesión se rechaza. Un endpoint nuevo debe
 registrarse con ID `0`.
@@ -174,15 +198,17 @@ registrarse con ID `0`.
 
 - Las entradas contienen intenciones (`Stop`, `MoveUp`, `MoveDown`), nunca
   coordenadas ni marcadores. Solo el servidor mueve palas, pelota y puntuaciones.
-- Para aceptar un `INPUT_CMD`, el ID debe pertenecer a la IP:puerto de origen.
-  Se comprueba su secuencia contra la última entrada aceptada de esa sesión.
+- Para aceptar `INPUT_CMD`, `PING` o `LEAVE`, el ID debe pertenecer a la IP:puerto
+  de origen. Comparten un contador de secuencias entrantes por sesión.
+  Se comprueba la secuencia contra el último comando aceptado.
   Duplicados y entradas antiguas se descartan. La comparación modular admite
   `u32::MAX -> 0`; diferencias de medio espacio (`2^31`) o más no son nuevas.
 - La primera secuencia de entrada es libre. Los reintentos de registro no
   consumen esta secuencia. El servidor usa un contador de salida global `u32`;
   las secuencias recibidas por un cliente pueden tener saltos.
 - Durante una partida, el cliente debe repetir **su intención actual**, incluido
-  `Stop`, al menos cada 100 ms con nueva secuencia. Si transcurren 250 ms sin una
+  `Stop`, al menos cada 100 ms con nueva secuencia. El trabajador de fase 6 la
+  repite cada **50 ms** y también al cambiar de intención. Si transcurren 250 ms sin una
   entrada fresca, el servidor detiene la pala. Así, perder una liberación de tecla
   no deja un movimiento permanente.
 - Antes de recibir `HELLO_ACK`, el cliente puede repetir `HELLO_REQ` cada 500 ms.
@@ -192,14 +218,16 @@ registrarse con ID `0`.
 - `MATCH_START` se repite cada 500 ms durante la partida para recuperar la
   pérdida de ese mensaje. El cliente debe tratarlo de forma idempotente.
 - Cada `STATE_SYNC` reemplaza el estado anterior; no se retransmiten fotos
-  antiguas. El receptor debe descartar estados atrasados por secuencia. Ninguna
+  antiguas de una partida activa. La foto terminal se conserva y retransmite
+  para recuperar el marcador final. El receptor debe descartar estados atrasados por secuencia. Ninguna
   de estas reglas convierte UDP en un transporte de entrega garantizada.
 
 ### Fin de partida y limpieza
 
 Una partida termina cuando alguien alcanza **7 puntos**, o cuando un jugador
-acumula **10 segundos sin entradas válidas ni registro repetido**. En el segundo
-caso pierde el primer jugador cuyo vencimiento detecta el tick (izquierda si
+acumula **10 segundos sin entradas válidas, ping válido ni registro repetido**,
+o cuando envía `LEAVE`. En una salida pierde el lado que abandona. Por timeout,
+pierde el primer jugador cuyo vencimiento detecta el tick (izquierda si
 ambos vencen en el mismo tick). Las sesiones de lobby sin actividad también
 expiran a los 10 segundos.
 
@@ -209,14 +237,28 @@ Y `[45, 555]`; la pelota rebota en paredes y palas. La simulación usa subpasos 
 hasta 8 ms y limita la velocidad horizontal a 600 px/s tras los rebotes.
 
 El hilo termina al finalizar la partida y el receptor central lo une. Conserva
-`GAME_OVER` durante **5 segundos**, lo repite cada 500 ms y lo devuelve ante
-consultas válidas de la sesión. Luego elimina ambas sesiones y libera capacidad.
+`GAME_OVER` durante **5 segundos**, lo repite cada 500 ms junto con la foto
+terminal por puntuación y lo devuelve ante consultas válidas de la sesión.
+La consulta no prolonga la retención. Luego elimina ambas sesiones y libera capacidad.
 Un nuevo registro con ID `0` después de esa retención inicia otro ciclo. Las
 otras partidas continúan durante todo este proceso.
 
-v1 no incorpora mensajes `Ready`, `Quit` ni ping/pong: esos comandos visuales
-necesitan una decisión de integración en fase 6. Dejar de enviar actividad se
-detecta por timeout; la medición RTT tampoco está implementada en esta fase.
+`Ready` es un comando local: al terminar o desconectarse, el trabajador envía
+`LEAVE` si conserva sesión, abre un socket nuevo y vuelve a registrarse. Durante
+registro, lobby o partida no reinicia la simulación. `Quit` envía `LEAVE` como
+mejor esfuerzo (tres datagramas con secuencias nuevas) y cierra el trabajador;
+si se pierden todos, el timeout es el mecanismo de respaldo.
+
+El cliente envía `PING` cada segundo, reintenta el registro cada 500 ms y
+considera desconectado al servidor tras 3 segundos sin mensajes válidos una vez
+registrado, o 5 segundos sin respuesta al registro inicial. `Ready` permite
+reintentar. Un `MATCH_START` repetido no borra marcador ni reinicia un gol.
+
+El receptor cliente compara secuencias por tipo de mensaje para que un estado
+rápido no descarte un ACK retrasado. Valida además la sesión y filtra el origen
+mediante un socket UDP conectado al endpoint del servidor. Un `GAME_OVER`
+adelantado admite después metadata y una foto `Finished` coherente con el
+ganador; ignora fotos de juego que intentarían reabrir la partida.
 
 ## 6. Validación de datagramas
 

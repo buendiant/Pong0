@@ -1,4 +1,4 @@
-/// Tipos de datos compartidos entre la interfaz gráfica (GUI) y la capa de red del cliente.
+//! Tipos de datos compartidos entre la interfaz gráfica (GUI) y la capa de red del cliente.
 
 /// Comandos de entrada generados por el jugador desde el GUI hacia la capa de red.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,13 +43,9 @@ pub enum MatchStatus {
         reset_timer: f32,
     },
     /// Partida concluida por límite de puntos
-    GameOver {
-        winner: PlayerSide,
-    },
+    GameOver { winner: PlayerSide },
     /// Conexión interrumpida o cerrada por el servidor
-    Disconnected {
-        reason: String,
-    },
+    Disconnected { reason: String },
 }
 
 /// Snapshot completo del estado del juego recibido desde el servidor o simulador.

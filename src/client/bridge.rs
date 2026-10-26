@@ -10,7 +10,7 @@ pub struct NetworkBridge {
     pub state_receiver: Receiver<GameStateSnapshot>,
 }
 
-/// Extremo del puente que se entrega al hilo de red UDP (desarrollado por el estudiante).
+/// Extremo del puente que se entrega al hilo de red UDP.
 pub struct NetworkWorkerEndpoint {
     pub input_receiver: Receiver<ClientInput>,
     pub state_sender: Sender<GameStateSnapshot>,
@@ -51,9 +51,16 @@ impl NetworkBridge {
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    current.status = MatchStatus::Disconnected {
-                        reason: "Canal de red cerrado".to_string(),
-                    };
+                    // Preservar la razón de desconexión o el resultado ya recibido.
+                    if !matches!(
+                        current.status,
+                        MatchStatus::GameOver { .. } | MatchStatus::Disconnected { .. }
+                    ) {
+                        current.status = MatchStatus::Disconnected {
+                            reason: "Canal de red cerrado".to_string(),
+                        };
+                        updated = true;
+                    }
                     break;
                 }
             }
@@ -67,11 +74,13 @@ impl NetworkBridge {
 /// aún la implementación del socket UDP del servidor.
 pub fn spawn_offline_demo_worker(endpoint: NetworkWorkerEndpoint) {
     thread::spawn(move || {
-        let mut state = GameStateSnapshot::default();
-        state.status = MatchStatus::OfflineDemo;
-        state.p1_name = "Tú (Local)".to_string();
-        state.p2_name = "Bot Demo".to_string();
-        state.my_side = PlayerSide::Left;
+        let mut state = GameStateSnapshot {
+            status: MatchStatus::OfflineDemo,
+            p1_name: "Tú (Local)".to_string(),
+            p2_name: "Bot Demo".to_string(),
+            my_side: PlayerSide::Left,
+            ..GameStateSnapshot::default()
+        };
 
         let mut ball_speed_x: f32 = 280.0;
         let mut ball_speed_y: f32 = 180.0;
@@ -109,7 +118,10 @@ pub fn spawn_offline_demo_worker(endpoint: NetworkWorkerEndpoint) {
             }
 
             // 2. Simulación física elemental local
-            if matches!(state.status, MatchStatus::OfflineDemo | MatchStatus::InMatch) {
+            if matches!(
+                state.status,
+                MatchStatus::OfflineDemo | MatchStatus::InMatch
+            ) {
                 // Movimiento pala izquierda (controlada por el jugador)
                 state.paddle_left_y += p1_dir * paddle_speed * dt;
                 state.paddle_left_y = state.paddle_left_y.clamp(45.0, 555.0);
@@ -117,7 +129,11 @@ pub fn spawn_offline_demo_worker(endpoint: NetworkWorkerEndpoint) {
                 // Movimiento pala derecha (IA simple de seguimiento)
                 let target_y = state.ball_y;
                 let diff = target_y - state.paddle_right_y;
-                let bot_dir = if diff.abs() > 10.0 { diff.signum() } else { 0.0 };
+                let bot_dir = if diff.abs() > 10.0 {
+                    diff.signum()
+                } else {
+                    0.0
+                };
                 state.paddle_right_y += bot_dir * (paddle_speed * 0.75) * dt;
                 state.paddle_right_y = state.paddle_right_y.clamp(45.0, 555.0);
 
