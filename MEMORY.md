@@ -24,9 +24,42 @@ El progreso del proyecto se rige por las siguientes reglas estrictas de transici
 
 ## Historial de Versiones
 
+### [BETA 1.0] — 2026-10-25
+
+* **Estado:** Actual (MVP Completo y Entregables Finales).
+* **Hito:** Consolidación de Fase 6 como MVP jugable de extremo a extremo, preparación de entregables de Fase 7, creación de Makefile, README oficial de la asignatura, guía de distribución y sustentación de código, y saneamiento del repositorio.
+* **Alcance:** Por instrucción expresa del usuario ante el cierre inminente de entregas, se consolida la versión BETA (Minimum Viable Product). El juego cuenta con servidor autoritativo UDP Berkeley, cliente gráfico desacoplado por canales MPSC, protocolo binario manual de 10 mensajes con Big-Endian, 41 pruebas automatizadas pasando al 100%, y toda la documentación formal requerida por `ProyectoPongN1.md`.
+
+#### Paso 1. Saneamiento del repositorio Git
+* Se eliminaron del seguimiento de git 106 archivos temporales de compilación (`target/`) que se habían versionado accidentalmente en el commit inicial, reduciendo el peso del repo y limpiando `git status`.
+* Se actualizó `.gitignore` para omitir `/target`, binarios locales (`server`, `client`) y archivos `.log`.
+
+#### Paso 2. Guía de distribución de código y sustentación oral
+* Se creó `docs/distribucion-codigo.md` separando rigurosamente:
+  * **Módulo de Red y Concurrencia (Evaluación 100% / Autoría del estudiante):** `src/protocol.rs`, `src/server.rs`, `src/game.rs`, `src/bin/server.rs`, `src/client/network.rs` y `tests/*`.
+  * **Módulo de Interfaz Gráfica (Asistido por IA / No computable para nota de redes):** `src/client/renderer.rs`, `src/client/gui.rs`, `src/client/connection.rs`, `src/bin/client.rs`.
+  * **Capa de Desacoplamiento:** `NetworkBridge` y contratos `ClientInput` / `GameStateSnapshot`.
+* Se añadieron las 5 preguntas y respuestas esenciales para la sustentación oral ante el docente.
+
+#### Paso 3. Creación del Makefile estándar
+* Se redactó `Makefile` en la raíz con los targets obligatorios exigidos por la rúbrica: `all`, `server` (compilación headless sin librerías gráficas), `client`, `test` (ejecución de 41 pruebas), `check`, `run-server` (con puertos y archivo de log configurables) y `clean`.
+
+#### Paso 4. Documentación formal en README.md
+* Se generó `README.md` estructurado exactamente bajo las cuatro secciones obligatorias de `ProyectoPongN1.md`:
+  1. *Introducción:* Contexto, objetivos telemáticos y modelo C/S autoritativo.
+  2. *Desarrollo:* Arquitectura detallada, justificación de UDP vs TCP, protocolo binario `MyAppGameProtocol`, concurrencia de partidas, logger dual, instrucciones de compilación/ejecución y guía de despliegue en AWS Academy EC2 con Security Groups.
+  3. *Conclusiones:* Análisis de sobrecarga binaria vs JSON, mitigación de pérdida/desorden en UDP, prevención de trampas y medición monotónica de RTT.
+  4. *Referencias:* Beej's Guide, RFC 768, Valve Latency Compensation, Rust Networking.
+
+#### Paso 5. Verificación de compilación y pruebas
+* Las 41 pruebas pasan al 100% (`cargo test`).
+* `cargo check --bin server --no-default-features` y `cargo check --bin client` compilan sin advertencias ni errores.
+
+---
+
 ### [Alpha 0.6] — 2026-10-25
 
-* **Estado:** Actual.
+* **Estado:** Completado.
 * **Hito:** Implementación de fase 6: cliente gráfico conectado al servidor UDP autoritativo, con registro, estados, RTT, abandono y reconexión.
 * **Alcance:** Implementación completa solicitada expresamente por el usuario. Se verificaron clientes automatizados y dos ventanas gráficas en un computador. Se conserva Alpha hasta realizar la aceptación formal entre dos equipos físicos; no se declara esa prueba realizada ni se registra despliegue AWS.
 

@@ -1,3 +1,17 @@
+# Archivos de compilación de Cargo y Rust
 /target
+/target/
+target/
 **/*.rs.bk
+
+# Binarios locales copiados a la raíz
+/server
+/server.exe
+/client
+/client.exe
+
+# Archivos de log generados
+*.log
+
+# Bloqueo de dependencias de Cargo (opcional si es biblioteca, pero en binarios se suele conservar o ignorar según proyecto)
 Cargo.lock
